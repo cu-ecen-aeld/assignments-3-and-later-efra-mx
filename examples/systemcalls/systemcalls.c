@@ -1,3 +1,10 @@
+#define _XOPEN_SOURCE
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+
 #include "systemcalls.h"
 
 /**
@@ -17,7 +24,16 @@ bool do_system(const char *cmd)
  *   or false() if it returned a failure
 */
 
-    return true;
+    int ret;
+
+    ret = system(cmd);
+    if (ret == -1) {
+        /* Failed to execute */
+        return false;
+    } else if (!WIFEXITED(ret)) {
+        return false;
+    }
+    return WEXITSTATUS(ret) == 0;
 }
 
 /**
@@ -40,9 +56,11 @@ bool do_exec(int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
+        printf("[ %s ]\n", command[i]);
     }
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
@@ -59,9 +77,36 @@ bool do_exec(int count, ...)
  *
 */
 
+    pid_t pid;
+    bool result = false;
+    int status;
+
+    pid = fork();
+    if (pid == -1) {
+        /* Spawn failed */
+        perror ("fork");
+        goto safe_exit;
+    } else if (pid == 0) {
+        status = execv(command[0], command);
+        if (status == -1) {
+            perror("execv failed");
+            exit(-1);
+        }
+    }
+
+    printf("child: %d\n", pid);
+    if (waitpid(pid, &status, 0) == -1) {
+        /* Execution failed */
+        result = false;
+    } else if (WIFEXITED(status)) {
+        result = WEXITSTATUS(status) == 0;
+        printf("status: %d\n", WEXITSTATUS (status));
+    }
+
+safe_exit:
     va_end(args);
 
-    return true;
+    return result;
 }
 
 /**
@@ -78,6 +123,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
+        printf("[ %s ]\n", command[i]);
     }
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
@@ -92,8 +138,42 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0600);
 
+    if (fd < 0) {
+        goto safe_exit;
+    }
+
+    pid_t pid;
+    bool result = false;
+    int status;
+
+    pid = fork();
+    if (pid == -1) {
+        /* Spawn failed */
+        close(fd);
+        goto safe_exit;
+    } else if (pid == 0) {
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        status = execv(command[0], command);
+        if (status == -1) {
+            perror("execv failed");
+            exit(-1);
+        }
+    } else {
+        close(fd);
+    }
+
+    if (waitpid(pid, &status, 0) == -1) {
+        /* Execution failed */
+        result = false;
+    } else if (WIFEXITED(status)) {
+        result = WEXITSTATUS(status) == 0;
+    }
+
+safe_exit:
     va_end(args);
 
-    return true;
+    return result;
 }
