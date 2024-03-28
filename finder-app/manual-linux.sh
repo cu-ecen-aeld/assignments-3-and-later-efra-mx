@@ -128,7 +128,8 @@ make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE writer
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
 cp writer ${OUTDIR}/rootfs/home/
-cp writer finder*.sh ${OUTDIR}/rootfs/home/
+cp finder*.sh ${OUTDIR}/rootfs/home/
+cp autorun-qemu.sh ${OUTDIR}/rootfs/home/
 cp -r ../conf ${OUTDIR}/rootfs/home/
 # patch finder-test.sh
 sed -i -e 's/cat ..\//cat /g' ${OUTDIR}/rootfs/home/finder-test.sh
