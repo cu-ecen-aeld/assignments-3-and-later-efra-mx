@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [ $# -ne 2 ]; then
     echo "ERROR: This script requires two arguments:
@@ -19,7 +19,7 @@ if [ ! -d  "$filesdir" ]; then
 fi
 
 cd $filesdir
-items_count=$(find . -type f | wc -l)
-matching_lines=$(grep -r "$searchstr" | wc -l)
+items_count=$(find . -type f | grep -c ^)
+matching_lines=$(find . -type f -exec grep "$searchstr" {} \; | grep -c ^)
 echo "The number of files are $items_count and the number of matching lines are $matching_lines"
 
