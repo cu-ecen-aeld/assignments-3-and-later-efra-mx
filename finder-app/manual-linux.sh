@@ -55,11 +55,11 @@ if [ ! -f "${KERNEL_SRC_FILE}" ]; then
 	# echo "CLONING GIT LINUX STABLE VERSION ${KERNEL_VERSION} IN ${OUTDIR}"
 	# git clone ${KERNEL_REPO} --depth 1 --single-branch --branch ${KERNEL_VERSION}
 	echo "DOWNLOADING LINUX STABLE VERSION ${KERNEL_VERSION} IN ${OUTDIR}"
-    curl -o ${KERNEL_SRC_FILE} https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x/${KERNEL_SRC_FILE}
+    wget -q -O ${KERNEL_SRC_FILE} https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x/${KERNEL_SRC_FILE}
 fi
 
 if [ ! -d "${OUTDIR}/${KERNEL_FOLDER}" ]; then
-    bsdtar -xf ${KERNEL_SRC_FILE}
+    tar -xf ${KERNEL_SRC_FILE}
 fi
 if [ ! -e ${OUTDIR}/${KERNEL_FOLDER}/arch/${ARCH}/boot/Image ]; then
     cd ${KERNEL_FOLDER}
