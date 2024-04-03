@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -171,41 +172,12 @@ safe_exit:
     return rc;
 }
 
-int main(void)
+int run()
 {
-    struct addrinfo *servinfo, *p;
     struct sockaddr_storage their_addr; // connector's address information
     socklen_t sin_size;
     struct sigaction sa;
-    int yes=1;
     char s[INET6_ADDRSTRLEN];
-    int rv;
-    struct stat st = {0};
-
-    if (stat("/var/tmp", &st) == -1) {
-        mkdir("/var/tmp", 0700);
-    }
-    rv = create_socket(&sockfd, &p);
-    if (rv != 0 || p == NULL || sockfd < 0)  {
-        fprintf(stderr, "server: failed to open thr socket\n");
-        exit(-1);
-    }
-
-    if (listen(sockfd, BACKLOG) == -1) {
-        perror("listen");
-        exit(-1);
-    }
-
-    sa.sa_handler = signal_handler;
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(-1);
-    }
-    if (sigaction(SIGTERM, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(-1);
-    }
 
     printf("server: waiting for connections...\n");
 
@@ -240,5 +212,72 @@ int main(void)
         unlink(socket_data_filename);
     }
     return 0;
+
+}
+
+int main(int argc, char *argv[])
+{
+    struct addrinfo *p;
+    struct sigaction sa;
+    int rv = 0;
+    struct stat st = {0};
+    int daemon_mode = 0;
+    pid_t pid;
+
+    if( argc == 2 ) {
+        if (strcmp(argv[1], "-d") == 0) {
+            daemon_mode = 1;
+        }
+    } else if (argc > 2) {
+        printf("Too many arguments. Use -d to run as daemon.");
+        exit(-1);
+    }
+
+    sa.sa_handler = signal_handler;
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(-1);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(-1);
+    }
+
+    if (stat("/var/tmp", &st) == -1) {
+        mkdir("/var/tmp", 0777);
+    }
+    rv = create_socket(&sockfd, &p);
+    if (rv != 0 || p == NULL || sockfd < 0)  {
+        fprintf(stderr, "server: failed to open thr socket\n");
+        rv = -1;
+        goto finish;
+    }
+
+    if (listen(sockfd, BACKLOG) == -1) {
+        perror("listen");
+        rv = -1;
+        goto finish;
+    }
+
+    if (daemon_mode) {
+        pid = fork();
+        if (pid < 0) {
+            perror("fork fail");
+            rv = -1;
+        } else if (pid == 0) {
+            run();
+        } else {
+            // parent
+            printf("Running as deamon: %d\n", pid);
+        }
+    } else {
+        run();
+    }
+
+finish:
+    if (sockfd)
+        close(sockfd);
+    return rv;
 }
 
