@@ -19,7 +19,7 @@
 #define PORT "9000"  // the port users will be connecting to
 
 #define BACKLOG 10   // how many pending connections queue will hold
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE (1 << 20)
 
 volatile sig_atomic_t running = 0;
 volatile sig_atomic_t connected = 0;
@@ -156,7 +156,11 @@ int process(int sock) {
         if (rc == 1) {
             // write to file
             fprintf(data_fptr, "%s\n", buffer);
-            printf("DATA: %s\n", buffer);
+            printf("<< %s\n", buffer);
+            fseek(data_fptr, 0, SEEK_SET);
+            len = fread(buffer, 1, len, data_fptr);
+            send(sock, buffer, len, 0);
+            printf("<< %s\n", buffer);
         } else if (rc == 2) {
             // write to file
             fprintf(data_fptr, "%s", buffer);
@@ -196,7 +200,7 @@ int run()
             s, sizeof s);
         printf("server: got connection from %s\n", s);
         syslog(LOG_INFO, "Accepted connection from %s", s);
-        data_fptr = fopen(socket_data_filename, "a");
+        data_fptr = fopen(socket_data_filename, "a+");
 
         process(listener_fd);
 
@@ -218,7 +222,7 @@ int run()
 int main(int argc, char *argv[])
 {
     struct addrinfo *p;
-    struct sigaction sa;
+    struct sigaction sa = {0};
     int rv = 0;
     struct stat st = {0};
     int daemon_mode = 0;
