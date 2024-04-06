@@ -15,19 +15,28 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define PORT "9000"  // the port users will be connecting to
 
 #define BACKLOG 10   // how many pending connections queue will hold
 #define BUFFER_SIZE (1 << 20)
 
+
+struct connection_data {
+    sig_atomic_t connected;
+    int sock;  // listen on sock_fd, new connection on listener_fd
+    pthread_t thread;
+    struct sockaddr_storage addr_info; // connector's address information
+    char addr[INET6_ADDRSTRLEN];
+};
+
 volatile sig_atomic_t running = 0;
-volatile sig_atomic_t connected = 0;
 int sockfd = -1;
 FILE *data_fptr;
-int listener_fd;  // listen on sock_fd, new connection on listener_fd
 char socket_data_filename[] = "/var/tmp/aesdsocketdata";
-
+struct connection_data connection;
+char *buffer;
 
 void signal_handler(int signo){
     int saved_errno = errno;
@@ -43,13 +52,13 @@ void signal_handler(int signo){
             break;
     }
     running = 0;
-    connected = 0;
+    connection.connected = 0;
     if (sockfd)
         shutdown(sockfd, SHUT_RDWR);
-    if (listener_fd)
-        shutdown(listener_fd, SHUT_RDWR);
+    if (connection.sock)
+        shutdown(connection.sock, SHUT_RDWR);
     sockfd = -1;
-    sockfd = -1;
+    connection.sock = -1;
 
     errno = saved_errno;
 }
@@ -67,10 +76,8 @@ void *get_in_addr(struct sockaddr *sa)
 int create_socket(int *socketfd, struct addrinfo **p)
 {
     struct addrinfo hints, *servinfo;
-    struct sockaddr_storage their_addr; // connector's address information
     socklen_t sin_size;
     int yes=1;
-    char s[INET6_ADDRSTRLEN];
     int ret = 0;
 
     memset(&hints, 0, sizeof hints);
@@ -140,17 +147,23 @@ int receive_data(int sock, char *buffer, int buffer_len) {
 }
 
 
-int process(int sock) {
+void *thread_func(void *ptr)
+{
     char *buffer;
     int len = BUFFER_SIZE - 1;
     int rc = 0;
+    struct connection_data *conn = (struct connection_data *)ptr;
+    int error;
+    int sock = conn->sock;
 
-    buffer = (char *)malloc(BUFFER_SIZE);
-    if (!buffer) {
-        return -1;
-    }
-    connected = 1;
+    conn->connected = 1;
 
+    inet_ntop(conn->addr_info.ss_family,
+        get_in_addr((struct sockaddr *)&conn->addr_info),
+        conn->addr, sizeof(conn->addr));
+    printf("server: got connection from %s\n", conn->addr);
+    syslog(LOG_INFO, "Accepted connection from %s", conn->addr);
+    data_fptr = fopen(socket_data_filename, "a+");
     do {
         rc = receive_data(sock, buffer, len);
         if (rc == 1) {
@@ -166,57 +179,63 @@ int process(int sock) {
             fprintf(data_fptr, "%s", buffer);
         } else if (rc <= 0) {
             // error
-            connected = 0;
+            conn->connected = 0;
         }
-    } while (connected);
+    } while (conn->connected);
+    fclose(data_fptr);
 
 safe_exit:
+    if (sock >= 0) {
+        close(sock);
+        conn->sock = -1;
+    }
+    syslog(LOG_INFO, "Closed connection from %s", conn->addr);
     if (buffer)
         free(buffer);
-    return rc;
+    error = rc;
+    return ptr;
 }
 
-int run()
+int run(void)
 {
-    struct sockaddr_storage their_addr; // connector's address information
     socklen_t sin_size;
     struct sigaction sa;
-    char s[INET6_ADDRSTRLEN];
+    int listener;
+    int rc;
 
     printf("server: waiting for connections...\n");
+
+    buffer = (char *)malloc(BUFFER_SIZE);
+    if (!buffer) {
+        rc = -1;
+        printf("No memory");
+        goto safe_exit;
+    }
 
     openlog ("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
     running = 1;
     while(running) {  // main accept() loop
-        sin_size = sizeof their_addr;
-        listener_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-        if (listener_fd == -1) {
+        sin_size = sizeof(connection.addr_info);
+        connection.sock = accept(sockfd, (struct sockaddr *)&connection.addr_info, &sin_size);
+        if (connection.sock == -1) {
             perror("accept");
             continue;
         }
 
-        inet_ntop(their_addr.ss_family,
-            get_in_addr((struct sockaddr *)&their_addr),
-            s, sizeof s);
-        printf("server: got connection from %s\n", s);
-        syslog(LOG_INFO, "Accepted connection from %s", s);
-        data_fptr = fopen(socket_data_filename, "a+");
-
-        process(listener_fd);
-
-        if (listener_fd >= 0)
-            close(listener_fd);
-        fclose(data_fptr);
-        syslog(LOG_INFO, "Closed connection from %s", s);
+        pthread_create(&connection.thread, NULL, &thread_func, (void *) &connection);
+        // wait for threads to finish
+        pthread_join(connection.thread, NULL);
     }
 
+safe_exit:
     if (sockfd >= 0)
         close(sockfd);
     if (socket_data_filename) {
         unlink(socket_data_filename);
     }
+    if (buffer)
+        free(buffer);
     return 0;
-
 }
 
 int main(int argc, char *argv[])
@@ -270,13 +289,13 @@ int main(int argc, char *argv[])
             perror("fork fail");
             rv = -1;
         } else if (pid == 0) {
-            run();
+            rv = run();
         } else {
             // parent
             printf("Running as deamon: %d\n", pid);
         }
     } else {
-        run();
+        rv = run();
     }
 
 finish:
