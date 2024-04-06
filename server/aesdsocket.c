@@ -27,6 +27,7 @@ struct connection_data {
     sig_atomic_t connected;
     int sock;  // listen on sock_fd, new connection on listener_fd
     pthread_t thread;
+    pthread_mutex_t *lock;
     struct sockaddr_storage addr_info; // connector's address information
     char addr[INET6_ADDRSTRLEN];
 };
@@ -37,6 +38,8 @@ FILE *data_fptr;
 char socket_data_filename[] = "/var/tmp/aesdsocketdata";
 struct connection_data connection;
 char *buffer;
+pthread_mutex_t lock;
+
 
 void signal_handler(int signo){
     int saved_errno = errno;
@@ -163,8 +166,8 @@ void *thread_func(void *ptr)
         conn->addr, sizeof(conn->addr));
     printf("server: got connection from %s\n", conn->addr);
     syslog(LOG_INFO, "Accepted connection from %s", conn->addr);
-    data_fptr = fopen(socket_data_filename, "a+");
     do {
+        pthread_mutex_lock(conn->lock);
         rc = receive_data(sock, buffer, len);
         if (rc == 1) {
             // write to file
@@ -172,7 +175,10 @@ void *thread_func(void *ptr)
             printf("<< %s\n", buffer);
             fseek(data_fptr, 0, SEEK_SET);
             len = fread(buffer, 1, len, data_fptr);
-            send(sock, buffer, len, 0);
+            rc = send(sock, buffer, len, 0);
+            if (rc <= 0) {
+                conn->connected = 0;
+            }
             printf("<< %s\n", buffer);
         } else if (rc == 2) {
             // write to file
@@ -181,8 +187,8 @@ void *thread_func(void *ptr)
             // error
             conn->connected = 0;
         }
+        pthread_mutex_unlock(&lock);
     } while (conn->connected);
-    fclose(data_fptr);
 
 safe_exit:
     if (sock >= 0) {
@@ -213,6 +219,7 @@ int run(void)
     }
 
     openlog ("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
+    data_fptr = fopen(socket_data_filename, "a+");
     running = 1;
     while(running) {  // main accept() loop
         sin_size = sizeof(connection.addr_info);
@@ -222,6 +229,7 @@ int run(void)
             continue;
         }
 
+        connection.lock = &lock;
         pthread_create(&connection.thread, NULL, &thread_func, (void *) &connection);
         // wait for threads to finish
         pthread_join(connection.thread, NULL);
@@ -230,6 +238,7 @@ int run(void)
 safe_exit:
     if (sockfd >= 0)
         close(sockfd);
+    fclose(data_fptr);
     if (socket_data_filename) {
         unlink(socket_data_filename);
     }
