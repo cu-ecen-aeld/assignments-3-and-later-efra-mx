@@ -16,52 +16,63 @@
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include "linked-list.h"
 
 #define PORT "9000"  // the port users will be connecting to
 
-#define BACKLOG 10   // how many pending connections queue will hold
-#define BUFFER_SIZE (1 << 20)
+#define BACKLOG 10   // how many pending connection-> queue will hold
+#define BUFFER_SIZE (1 << 12)
 
 
 struct connection_data {
+    struct node *next;
+    int id;
     sig_atomic_t connected;
-    int sock;  // listen on sock_fd, new connection on listener_fd
+    int sock;  // listen on sock_fd, new connection->on listener_fd
     pthread_t thread;
     pthread_mutex_t *lock;
     struct sockaddr_storage addr_info; // connector's address information
     char addr[INET6_ADDRSTRLEN];
+    char *buffer;
 };
 
 volatile sig_atomic_t running = 0;
 int sockfd = -1;
 FILE *data_fptr;
 char socket_data_filename[] = "/var/tmp/aesdsocketdata";
-struct connection_data connection;
-char *buffer;
+struct connection_data *connections;
 pthread_mutex_t lock;
-
+struct node *list = NULL;
+int counter = 0;
 
 void signal_handler(int signo){
     int saved_errno = errno;
-    printf("signum: %d", signo);// debug
+    printf("signum: %d\n", signo);// debug
     switch (signo) {
         case SIGINT:
-            printf("SIGINT handler");//debug
+            printf("SIGINT handler\n");//debug
             break;
         case SIGTERM:
-            printf("SIGTERM handler");//debug
+            printf("SIGTERM handler\n");//debug
             break;
         default: /*Should never get this case*/
             break;
     }
     running = 0;
-    connection.connected = 0;
+
+    struct node *node = list;
+    struct connection_data *connection;
+    while (node != NULL) {
+        connection = (struct connection_data *) node;
+        connection->connected = 0;
+        if (connection->sock)
+            shutdown(connection->sock, SHUT_RDWR);
+        node = node->next;
+    }
     if (sockfd)
         shutdown(sockfd, SHUT_RDWR);
-    if (connection.sock)
-        shutdown(connection.sock, SHUT_RDWR);
     sockfd = -1;
-    connection.sock = -1;
+    connection->sock = -1;
 
     errno = saved_errno;
 }
@@ -126,7 +137,7 @@ safe_exit:
 }
 
 // Return values:
-//  0: connection aborted
+//  0: connection->aborted
 //  1: message completed
 //  2: message incompleted
 int receive_data(int sock, char *buffer, int buffer_len) {
@@ -152,12 +163,12 @@ int receive_data(int sock, char *buffer, int buffer_len) {
 
 void *thread_func(void *ptr)
 {
-    char *buffer;
     int len = BUFFER_SIZE - 1;
     int rc = 0;
     struct connection_data *conn = (struct connection_data *)ptr;
     int error;
     int sock = conn->sock;
+    char *buffer  = conn->buffer;
 
     conn->connected = 1;
 
@@ -168,18 +179,24 @@ void *thread_func(void *ptr)
     syslog(LOG_INFO, "Accepted connection from %s", conn->addr);
     do {
         pthread_mutex_lock(conn->lock);
+        len = BUFFER_SIZE - 1;
         rc = receive_data(sock, buffer, len);
         if (rc == 1) {
             // write to file
             fprintf(data_fptr, "%s\n", buffer);
-            printf("<< %s\n", buffer);
+            printf("[%d]<< %s\n", sock, buffer);
+
+            pthread_mutex_unlock(conn->lock);
+
+            pthread_mutex_lock(conn->lock);
             fseek(data_fptr, 0, SEEK_SET);
+            memset(buffer, 0, len);
             len = fread(buffer, 1, len, data_fptr);
             rc = send(sock, buffer, len, 0);
             if (rc <= 0) {
                 conn->connected = 0;
             }
-            printf("<< %s\n", buffer);
+            printf("[%d]>> %s\n", sock,buffer);
         } else if (rc == 2) {
             // write to file
             fprintf(data_fptr, "%s", buffer);
@@ -188,16 +205,16 @@ void *thread_func(void *ptr)
             conn->connected = 0;
         }
         pthread_mutex_unlock(&lock);
+        sleep(1);
     } while (conn->connected);
 
 safe_exit:
+    printf("thread[%d] socket[%d]: finishing\n", conn->id, conn->sock);
     if (sock >= 0) {
         close(sock);
         conn->sock = -1;
     }
-    syslog(LOG_INFO, "Closed connection from %s", conn->addr);
-    if (buffer)
-        free(buffer);
+    syslog(LOG_INFO, "Closed connection->from %s", conn->addr);
     error = rc;
     return ptr;
 }
@@ -208,34 +225,60 @@ int run(void)
     struct sigaction sa;
     int listener;
     int rc;
+    struct connection_data *connection = NULL;
+    struct node *node = NULL;
+    char *buffer;
 
-    printf("server: waiting for connections...\n");
+    printf("server: waiting for connection...\n");
 
     buffer = (char *)malloc(BUFFER_SIZE);
+    memset(buffer, 0, BUFFER_SIZE);
     if (!buffer) {
         rc = -1;
         printf("No memory");
         goto safe_exit;
     }
-
     openlog ("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
     data_fptr = fopen(socket_data_filename, "a+");
     running = 1;
     while(running) {  // main accept() loop
-        sin_size = sizeof(connection.addr_info);
-        connection.sock = accept(sockfd, (struct sockaddr *)&connection.addr_info, &sin_size);
-        if (connection.sock == -1) {
-            perror("accept");
+        connection = (struct connection_data *)node_create(sizeof(struct connection_data));
+        if (!connection) {
+            rc = -1;
+            printf("No memory for allocating a new connection");
             continue;
         }
 
-        connection.lock = &lock;
-        pthread_create(&connection.thread, NULL, &thread_func, (void *) &connection);
-        // wait for threads to finish
-        pthread_join(connection.thread, NULL);
+        sin_size = sizeof(connection->addr_info);
+        connection->sock = accept(sockfd, (struct sockaddr *)&connection->addr_info, &sin_size);
+        if (connection->sock == -1) {
+            perror("accept");
+            node_destroy((struct node *)connection);
+            continue;
+        }
+        printf("listen socket: %d\n", connection->sock);
+        if (connections == NULL) {
+            connections = connection;
+            list = (struct node *)connections;
+        } else {
+            list_push(list, (struct node *)connection);
+        }
+        connection->lock = &lock;
+        connection->buffer = buffer;
+        connection->id = counter++;
+        printf("thread[%d] socket[%d]: new\n", connection->id, connection->sock);
+        pthread_create(&connection->thread, NULL, &thread_func, (void *) connection);
     }
 
 safe_exit:
+    while (list != NULL) {
+        connection = (struct connection_data *) list;
+        // wait for threads to finish
+        pthread_join(connection->thread, NULL);
+        node = list;
+        list = list->next;
+        node_destroy(node);
+    }
     if (sockfd >= 0)
         close(sockfd);
     fclose(data_fptr);
@@ -308,7 +351,7 @@ int main(int argc, char *argv[])
     }
 
 finish:
-    if (sockfd)
+    if (sockfd >= 0)
         close(sockfd);
     return rv;
 }
