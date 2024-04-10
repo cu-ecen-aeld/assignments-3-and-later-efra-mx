@@ -1,9 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 #include <signal.h>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+//#define _POSIX_C_SOURCE 200809L
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -14,6 +20,7 @@
 #include <syslog.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <stdbool.h>
 #include <pthread.h>
 #include "linked-list.h"
@@ -21,8 +28,8 @@
 #define PORT "9000"  // the port users will be connecting to
 
 #define BACKLOG 10   // how many pending connection-> queue will hold
-#define BUFFER_SIZE (1 << 12)
-
+#define BUFFER_SIZE (1 << 16)
+#define ALARM_PERIOD 10
 
 struct connection_data {
     struct node *next;
@@ -44,6 +51,7 @@ struct connection_data *connections;
 pthread_mutex_t lock;
 struct node *list = NULL;
 int counter = 0;
+timer_t timer_id;
 
 void signal_handler(int signo){
     int saved_errno = errno;
@@ -72,9 +80,46 @@ void signal_handler(int signo){
     if (sockfd)
         shutdown(sockfd, SHUT_RDWR);
     sockfd = -1;
-    connection->sock = -1;
+    if (connection)
+        connection->sock = -1;
 
     errno = saved_errno;
+}
+
+
+void alarm_handler(int signo){
+    int saved_errno = errno;
+    char outstr[128];
+    struct tm* tm_info;
+    time_t t;
+    struct tm *tmp;
+    
+    printf("signum: %d\n", signo);// debug
+    switch (signo) {
+        case SIGALRM:
+            printf("SIGALRM handler\n");//debug
+            break;
+        default: /*Should never get this case*/
+            return;
+    }
+   
+    t = time(NULL);
+    tmp = localtime(&t);
+    if (tmp == NULL) {
+        perror("localtime");
+        return;
+    }
+
+    if (strftime(outstr, sizeof(outstr), "%a, %d %b %Y %T %z", tmp) == 0) {
+        printf("strftime error");
+        return;
+    }
+
+    pthread_mutex_lock(&lock);
+    fprintf(data_fptr, "timestamp:%s\n", outstr);
+    printf("<< timestamp:%s\n", outstr);
+    alarm(ALARM_PERIOD);
+    pthread_mutex_unlock(&lock);
 }
 
 // get sockaddr, IPv4 or IPv6:
@@ -222,12 +267,15 @@ safe_exit:
 int run(void)
 {
     socklen_t sin_size;
+    struct itimerspec its;
     struct sigaction sa;
     int listener;
     int rc;
     struct connection_data *connection = NULL;
     struct node *node = NULL;
     char *buffer;
+    struct sigevent sev;
+    sigset_t mask;
 
     printf("server: waiting for connection...\n");
 
@@ -239,7 +287,11 @@ int run(void)
         goto safe_exit;
     }
     openlog ("aesdsocket", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
+    data_fptr = fopen(socket_data_filename, "w");
+    fclose(data_fptr);
     data_fptr = fopen(socket_data_filename, "a+");
+
+    alarm(ALARM_PERIOD);
     running = 1;
     while(running) {  // main accept() loop
         connection = (struct connection_data *)node_create(sizeof(struct connection_data));
@@ -279,6 +331,8 @@ safe_exit:
         list = list->next;
         node_destroy(node);
     }
+    if (timer_id)
+        timer_delete(timer_id);
     if (sockfd >= 0)
         close(sockfd);
     fclose(data_fptr);
@@ -294,6 +348,7 @@ int main(int argc, char *argv[])
 {
     struct addrinfo *p;
     struct sigaction sa = {0};
+    struct sigaction alarm = {0};
     int rv = 0;
     struct stat st = {0};
     int daemon_mode = 0;
@@ -316,6 +371,13 @@ int main(int argc, char *argv[])
     }
     if (sigaction(SIGTERM, &sa, NULL) == -1) {
         perror("sigaction");
+        exit(-1);
+    }
+
+    alarm.sa_handler = alarm_handler;
+    alarm.sa_flags = SA_RESTART;
+    if (sigaction(SIGALRM, &alarm, NULL) == -1) {
+        perror("alarm");
         exit(-1);
     }
 
