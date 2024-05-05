@@ -13,6 +13,7 @@
 #else
 #include <string.h>
 #endif
+#include <stdio.h>
 
 #include "aesd-circular-buffer.h"
 
@@ -32,7 +33,35 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     /**
     * TODO: implement per description
     */
-    return NULL;
+    uint8_t index = buffer->in_offs;
+    uint32_t cursor = 0;
+    struct aesd_buffer_entry *entry;
+    struct aesd_buffer_entry *matched_entry = NULL;
+
+    for (int c = 0; c < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; c++) {
+	entry = &buffer->entry[index];
+        if ((cursor <= char_offset) && (char_offset < (cursor + entry->size))) {
+            *entry_offset_byte_rtn = char_offset - cursor;
+            matched_entry = entry;
+	    break;
+        }
+        cursor += entry->size;
+	index++;
+        index %= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+    return matched_entry;
+}
+
+struct aesd_buffer_entry *aesd_circular_buffer_find_next_entry(struct aesd_circular_buffer *buffer, uint8_t *index_out)
+{
+    uint8_t index;
+    struct aesd_buffer_entry *entry;
+
+    index = buffer->in_offs;
+    entry = &buffer->entry[index];
+    index = (index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    *index_out = index;
+    return entry;
 }
 
 /**
@@ -47,6 +76,17 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     /**
     * TODO: implement per description
     */
+    if (buffer == NULL) {
+        return;
+    }
+
+    uint8_t index;
+    struct aesd_buffer_entry *entry;
+
+    entry = aesd_circular_buffer_find_next_entry(buffer, &index);
+    buffer->in_offs = index;
+    *entry = *add_entry;
+    buffer->full = (buffer->entry[index].buffptr) != NULL;
 }
 
 /**
