@@ -1,5 +1,5 @@
-CC=$(CROSS_COMPILE)gcc
-CFLAGS=-g -Wall -Werror -gdwarf -DDEBUG
+CC ?=$(CROSS_COMPILE)gcc
+CFLAGS ?=-g -Wall -Werror -gdwarf -DDEBUG
 LDFLAGS ?= -pthread -lrt
 
 all: aesdsocket
